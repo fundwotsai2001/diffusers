@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+####### copy this code to /diffusers/models/transformers/stable_audio_transformer.py, sorry for the inconvenient
 
 from typing import Any, Dict, Optional, Union
 
@@ -153,6 +154,8 @@ class StableAudioDiTBlock(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         encoder_hidden_states: Optional[torch.Tensor] = None,
+        encoder_hidden_states_con: Optional[torch.Tensor] = None,
+        encoder_hidden_states_audio: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
         rotary_embedding: Optional[torch.FloatTensor] = None,
     ) -> torch.Tensor:
@@ -174,6 +177,8 @@ class StableAudioDiTBlock(nn.Module):
         attn_output = self.attn2(
             norm_hidden_states,
             encoder_hidden_states=encoder_hidden_states,
+            encoder_hidden_states_con=encoder_hidden_states_con,
+            encoder_hidden_states_audio = encoder_hidden_states_audio,
             attention_mask=encoder_attention_mask,
         )
         hidden_states = attn_output + hidden_states
@@ -354,6 +359,8 @@ class StableAudioDiTModel(ModelMixin, ConfigMixin):
         hidden_states: torch.FloatTensor,
         timestep: torch.LongTensor = None,
         encoder_hidden_states: torch.FloatTensor = None,
+        encoder_hidden_states_con: torch.FloatTensor = None,
+        encoder_hidden_states_audio: torch.FloatTensor = None,
         global_hidden_states: torch.FloatTensor = None,
         rotary_embedding: torch.FloatTensor = None,
         return_dict: bool = True,
@@ -395,7 +402,12 @@ class StableAudioDiTModel(ModelMixin, ConfigMixin):
             If `return_dict` is True, an [`~models.transformer_2d.Transformer2DModelOutput`] is returned, otherwise a
             `tuple` where the first element is the sample tensor.
         """
+        # print("cross_attention_proj", next(self.cross_attention_proj.parameters()).dtype)
+        # print("encoder_hidden_states", encoder_hidden_states.dtype)
+        # Assuming cross_attention_proj is a linear layer or similar
+        self.cross_attention_proj = self.cross_attention_proj.to(encoder_hidden_states.dtype)
         cross_attention_hidden_states = self.cross_attention_proj(encoder_hidden_states)
+        cross_attention_hidden_states_con = encoder_hidden_states_con
         global_hidden_states = self.global_proj(global_hidden_states)
         time_hidden_states = self.timestep_proj(self.time_proj(timestep.to(self.dtype)))
 
@@ -441,6 +453,8 @@ class StableAudioDiTModel(ModelMixin, ConfigMixin):
                     hidden_states=hidden_states,
                     attention_mask=attention_mask,
                     encoder_hidden_states=cross_attention_hidden_states,
+                    encoder_hidden_states_con=cross_attention_hidden_states_con,
+                    encoder_hidden_states_audio = encoder_hidden_states_audio,
                     encoder_attention_mask=encoder_attention_mask,
                     rotary_embedding=rotary_embedding,
                 )
