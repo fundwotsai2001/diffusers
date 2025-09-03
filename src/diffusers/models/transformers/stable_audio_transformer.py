@@ -174,7 +174,7 @@ class StableAudioDiTBlock(nn.Module):
         # 2. Cross-Attention
         norm_hidden_states = self.norm2(hidden_states)
 
-        attn_output = self.attn2(
+        attn_output, encoder_hidden_states_con = self.attn2(
             norm_hidden_states,
             encoder_hidden_states=encoder_hidden_states,
             encoder_hidden_states_con=encoder_hidden_states_con,
@@ -189,7 +189,7 @@ class StableAudioDiTBlock(nn.Module):
 
         hidden_states = ff_output + hidden_states
 
-        return hidden_states
+        return hidden_states, encoder_hidden_states_con
 
 
 class StableAudioDiTModel(ModelMixin, ConfigMixin):
@@ -402,12 +402,9 @@ class StableAudioDiTModel(ModelMixin, ConfigMixin):
             If `return_dict` is True, an [`~models.transformer_2d.Transformer2DModelOutput`] is returned, otherwise a
             `tuple` where the first element is the sample tensor.
         """
-        # print("cross_attention_proj", next(self.cross_attention_proj.parameters()).dtype)
-        # print("encoder_hidden_states", encoder_hidden_states.dtype)
         # Assuming cross_attention_proj is a linear layer or similar
         self.cross_attention_proj = self.cross_attention_proj.to(encoder_hidden_states.dtype)
         cross_attention_hidden_states = self.cross_attention_proj(encoder_hidden_states)
-        cross_attention_hidden_states_con = encoder_hidden_states_con
         global_hidden_states = self.global_proj(global_hidden_states)
         time_hidden_states = self.timestep_proj(self.time_proj(timestep.to(self.dtype)))
 
@@ -424,7 +421,6 @@ class StableAudioDiTModel(ModelMixin, ConfigMixin):
         if attention_mask is not None:
             prepend_mask = torch.ones((hidden_states.shape[0], 1), device=hidden_states.device, dtype=torch.bool)
             attention_mask = torch.cat([prepend_mask, attention_mask], dim=-1)
-
         for block in self.transformer_blocks:
             if self.training and self.gradient_checkpointing:
 
@@ -449,11 +445,11 @@ class StableAudioDiTModel(ModelMixin, ConfigMixin):
                 )
 
             else:
-                hidden_states = block(
+                hidden_states, encoder_hidden_states_con = block(
                     hidden_states=hidden_states,
                     attention_mask=attention_mask,
                     encoder_hidden_states=cross_attention_hidden_states,
-                    encoder_hidden_states_con=cross_attention_hidden_states_con,
+                    encoder_hidden_states_con=encoder_hidden_states_con,
                     encoder_hidden_states_audio = encoder_hidden_states_audio,
                     encoder_attention_mask=encoder_attention_mask,
                     rotary_embedding=rotary_embedding,
