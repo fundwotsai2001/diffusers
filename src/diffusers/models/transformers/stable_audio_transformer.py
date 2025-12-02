@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+####### copy this code to /diffusers/models/transformers/stable_audio_transformer.py, sorry for the inconvenient
 
-from typing import Dict, Optional, Union
+from typing import Any, Dict, Optional, Union
 
 import numpy as np
 import torch
@@ -29,7 +30,7 @@ from ...models.attention_processor import (
 )
 from ...models.modeling_utils import ModelMixin
 from ...models.transformers.transformer_2d import Transformer2DModelOutput
-from ...utils import logging
+from ...utils import is_torch_version, logging
 from ...utils.torch_utils import maybe_allow_in_graph
 
 
@@ -152,7 +153,10 @@ class StableAudioDiTBlock(nn.Module):
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
+        hidden_states_original: Optional[torch.Tensor] = None,
         encoder_hidden_states: Optional[torch.Tensor] = None,
+        encoder_hidden_states_con: Optional[torch.Tensor] = None,
+        encoder_hidden_states_audio: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
         rotary_embedding: Optional[torch.FloatTensor] = None,
     ) -> torch.Tensor:
@@ -173,7 +177,10 @@ class StableAudioDiTBlock(nn.Module):
 
         attn_output = self.attn2(
             norm_hidden_states,
+            hidden_states_original=hidden_states,
             encoder_hidden_states=encoder_hidden_states,
+            encoder_hidden_states_con=encoder_hidden_states_con,
+            encoder_hidden_states_audio = encoder_hidden_states_audio,
             attention_mask=encoder_attention_mask,
         )
         hidden_states = attn_output + hidden_states
@@ -211,7 +218,6 @@ class StableAudioDiTModel(ModelMixin, ConfigMixin):
     """
 
     _supports_gradient_checkpointing = True
-    _skip_layerwise_casting_patterns = ["preprocess_conv", "postprocess_conv", "^proj_in$", "^proj_out$", "norm"]
 
     @register_to_config
     def __init__(
@@ -346,11 +352,17 @@ class StableAudioDiTModel(ModelMixin, ConfigMixin):
         """
         self.set_attn_processor(StableAudioAttnProcessor2_0())
 
+    def _set_gradient_checkpointing(self, module, value=False):
+        if hasattr(module, "gradient_checkpointing"):
+            module.gradient_checkpointing = value
+
     def forward(
         self,
         hidden_states: torch.FloatTensor,
         timestep: torch.LongTensor = None,
         encoder_hidden_states: torch.FloatTensor = None,
+        encoder_hidden_states_con: torch.FloatTensor = None,
+        encoder_hidden_states_audio: torch.FloatTensor = None,
         global_hidden_states: torch.FloatTensor = None,
         rotary_embedding: torch.FloatTensor = None,
         return_dict: bool = True,
@@ -392,7 +404,12 @@ class StableAudioDiTModel(ModelMixin, ConfigMixin):
             If `return_dict` is True, an [`~models.transformer_2d.Transformer2DModelOutput`] is returned, otherwise a
             `tuple` where the first element is the sample tensor.
         """
+        # print("cross_attention_proj", next(self.cross_attention_proj.parameters()).dtype)
+        # print("encoder_hidden_states", encoder_hidden_states.dtype)
+        # Assuming cross_attention_proj is a linear layer or similar
+        self.cross_attention_proj = self.cross_attention_proj.to(encoder_hidden_states.dtype)
         cross_attention_hidden_states = self.cross_attention_proj(encoder_hidden_states)
+        cross_attention_hidden_states_con = encoder_hidden_states_con
         global_hidden_states = self.global_proj(global_hidden_states)
         time_hidden_states = self.timestep_proj(self.time_proj(timestep.to(self.dtype)))
 
@@ -411,14 +428,26 @@ class StableAudioDiTModel(ModelMixin, ConfigMixin):
             attention_mask = torch.cat([prepend_mask, attention_mask], dim=-1)
 
         for block in self.transformer_blocks:
-            if torch.is_grad_enabled() and self.gradient_checkpointing:
-                hidden_states = self._gradient_checkpointing_func(
-                    block,
+            if self.training and self.gradient_checkpointing:
+
+                def create_custom_forward(module, return_dict=None):
+                    def custom_forward(*inputs):
+                        if return_dict is not None:
+                            return module(*inputs, return_dict=return_dict)
+                        else:
+                            return module(*inputs)
+
+                    return custom_forward
+
+                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
+                hidden_states = torch.utils.checkpoint.checkpoint(
+                    create_custom_forward(block),
                     hidden_states,
                     attention_mask,
                     cross_attention_hidden_states,
                     encoder_attention_mask,
                     rotary_embedding,
+                    **ckpt_kwargs,
                 )
 
             else:
@@ -426,6 +455,8 @@ class StableAudioDiTModel(ModelMixin, ConfigMixin):
                     hidden_states=hidden_states,
                     attention_mask=attention_mask,
                     encoder_hidden_states=cross_attention_hidden_states,
+                    encoder_hidden_states_con=cross_attention_hidden_states_con,
+                    encoder_hidden_states_audio = encoder_hidden_states_audio,
                     encoder_attention_mask=encoder_attention_mask,
                     rotary_embedding=rotary_embedding,
                 )
